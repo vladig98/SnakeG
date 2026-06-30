@@ -1,0 +1,19 @@
+/* src/index.css */
+:root {
+    background-color: #0b0f19; /* Deep dark blue/black */
+    color: #e2e8f0;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+body, html, #root {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* Optional: A nice hover effect for our buttons */
+button:hover {
+    filter: brightness(1.1);
+}

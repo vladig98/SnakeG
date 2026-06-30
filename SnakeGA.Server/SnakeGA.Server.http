@@ -1,0 +1,6 @@
+@SnakeGA.Server_HostAddress = http://localhost:5298
+
+GET {{SnakeGA.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

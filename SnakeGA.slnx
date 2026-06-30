@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="snakega.client/snakega.client.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+  <Project Path="SnakeGA.Server/SnakeGA.Server.csproj" />
+</Solution>
