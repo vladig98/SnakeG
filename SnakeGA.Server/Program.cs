@@ -1,3 +1,4 @@
+using SnakeGA.Server.Dtos;
 using SnakeGA.Server.Hubs;
 using SnakeGA.Server.Services;
 
@@ -7,6 +8,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
 
 builder.Services.AddHostedService<SnakeService>();
+builder.Services.AddSingleton<SimulationControl>();
 
 builder.Services.AddCors(options =>
 {
@@ -36,5 +38,11 @@ app.UseAuthorization();
 
 app.MapFallbackToFile("/index.html");
 app.MapHub<SnakeHub>("/snake");
+
+app.MapPost("/api/simulate/{count}", (int count, SimulationControl control) =>
+{
+    control.TargetGeneration += count;
+    return Results.Ok(new { TargetGeneration = control.TargetGeneration });
+});
 
 app.Run();

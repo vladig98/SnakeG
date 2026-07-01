@@ -4,7 +4,7 @@ using SnakeGA.Server.Hubs;
 
 namespace SnakeGA.Server.Services;
 
-public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
+public class SnakeService(IHubContext<SnakeHub> hubContext, SimulationControl control) : BackgroundService
 {
     private NeuralNetwork? _bestPreviousBrain = null;
     private readonly Dictionary<string, GameState?> _gameStates = [];
@@ -18,36 +18,74 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
     private const int numberOfParents = 10;
     private const string best = "best";
     private int gen = 1;
-    private const int eatenApplePoints = 100;
-    private const int wrongDirectionPoints = -3;
+    private const int eatenApplePoints = 10_000;
+    private const int wrongDirectionPoints = 0;
     private const int rightDirectionPoints = 1;
     private const int pointForLooping = -100;
-    private const int preTrainGenerations = 5_000;
+    private const int deathPenalty = -10_000;
+    private const int elitismCount = 3;
+    private bool _readyToEvolve = false;
+    private List<Point> _bestFoodHistory = [];
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Yield();
-        while (gen <= preTrainGenerations && !stoppingToken.IsCancellationRequested)
-        {
-            if (gen % 100 == 0)
-            {
-                Console.WriteLine($"Gen: {gen}");
-            }
-            GenerateNextGenerationData();
-        }
+        await Task.Yield(); // Let the web server boot
+
+        int fastForwardFrameCounter = 0;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var gameStates = GenerateNextGenerationData();
-            var payload = new { Generation = gen, Players = gameStates };
+            // 1. Are we paused on a graveyard?
+            bool isPaused = gen >= control.TargetGeneration && _readyToEvolve;
 
-            await hubContext.Clients.All.SendAsync("ReceiveTick", payload, stoppingToken);
-            await Task.Delay(100, stoppingToken);
+            if (isPaused)
+            {
+                await Task.Delay(100, stoppingToken);
+                continue; // Skip the rest of the loop
+            }
+
+            // 2. Are we trying to catch up to the Target Generation?
+            bool isFastForwarding = gen < control.TargetGeneration;
+
+            // Calculate the math for the frame
+            var gameStates = GenerateNextGenerationData();
+
+            if (isFastForwarding)
+            {
+                // FAST FORWARD MODE
+                // We do NOT broadcast to React, and we do NOT delay time.
+                fastForwardFrameCounter++;
+
+                // Every 1,000 frames, yield control back to the CPU for a microsecond 
+                // so your React frontend can still talk to the backend API!
+                if (fastForwardFrameCounter % 1000 == 0)
+                {
+                    await Task.Yield();
+                }
+            }
+            else
+            {
+                // NORMAL PLAYBACK MODE
+                // We reached the target generation! Broadcast it so you can watch it play out.
+                var payload = new { Generation = gen, Players = gameStates };
+                await hubContext.Clients.All.SendAsync("ReceiveTick", payload, stoppingToken);
+
+                // Keep the 10 FPS delay so human eyes can track the movement
+                await Task.Delay(100, stoppingToken);
+            }
         }
     }
 
     private Dictionary<string, GameState?> GenerateNextGenerationData()
     {
+        // 1. If the graveyard is on screen and we are unpaused, do the evolution!
+        if (_readyToEvolve)
+        {
+            EvolveNewGeneration();
+            _readyToEvolve = false;
+            return _gameStates;
+        }
+
         bool allDead = true;
         for (int i = 0; i < populationSize; i++)
         {
@@ -69,10 +107,11 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
             }
 
             state = UpdateBody(state);
-            if (state == null)
+            if (state.IsDead)
             {
                 _gameOver[key] = true;
-                _gameStates[key] = null;
+                _finalStates.Add(state);  // Saves the valid dead state (not null!)
+                _gameStates[key] = state; // Keeps the body visible for the React UI
 
                 continue;
             }
@@ -98,15 +137,17 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
                         Food: new Point(-1, -1),
                         Health: width * heigth,
                         Brain: _bestPreviousBrain,
-                        Visited: []
+                        Visited: [],
+                        FoodHistory: _bestFoodHistory,
+                        IsReplay: true
                     );
                 }
 
                 bestState = UpdateBody(bestState);
-                if (bestState == null)
+                if (bestState.IsDead)
                 {
                     _gameOver[best] = true;
-                    _gameStates[best] = null;
+                    _gameStates[best] = bestState;
                 }
                 else
                 {
@@ -115,68 +156,86 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
                 }
             }
         }
-        else
-        {
-            _gameStates[best] = null;
-        }
 
+        // 2. When everyone dies, flip the flag but DO NOT evolve yet!
         if (allDead)
         {
-            List<GameState> states = _finalStates;
-
-            GameState champion = states.OrderByDescending(s => s.Points).First();
-            _bestPreviousBrain = champion.Brain;
-
-            List<GameState> parents = [];
-            for (int i = 0; i < numberOfParents; i++)
-            {
-                GameState? bestContender = null;
-                for (int t = 0; t < tournamentSize; t++)
-                {
-                    int randomIndex = Random.Shared.Next(states.Count);
-                    GameState contender = states[randomIndex];
-
-                    if (bestContender == null || contender.Points > bestContender.Points)
-                    {
-                        bestContender = contender;
-                    }
-                }
-
-                parents.Add(bestContender!);
-            }
-
-            List<NeuralNetwork> nextGenerationBrains = [];
-            for (int i = 0; i < populationSize; i++)
-            {
-                GameState parentA = parents[Random.Shared.Next(parents.Count)];
-                GameState parentB = parents[Random.Shared.Next(parents.Count)];
-
-                NeuralNetwork babyBrain = parentA.Brain.CrossoverAndMutate(parentB.Brain, mutationRate: 0.05f);
-                nextGenerationBrains.Add(babyBrain);
-            }
-
-            _finalStates.Clear();
-            for (int i = 0; i < populationSize; i++)
-            {
-                string key = i.ToString();
-                _gameOver[key] = false;
-
-                _gameStates[key] = new GameState(
-                    Body: [],
-                    Food: new Point(-1, -1),
-                    Health: width * heigth,
-                    Brain: nextGenerationBrains[i],
-                    Visited: []
-                );
-            }
-
-            _gameOver[best] = false;
-            _gameStates[best] = null;
-
-            gen++;
+            _readyToEvolve = true;
         }
 
+        // This now safely returns the graveyard!
         return _gameStates;
+    }
+
+    private void EvolveNewGeneration()
+    {
+        List<GameState> validStates = _finalStates.Where(s => s != null).ToList();
+
+        GameState? champion = validStates.OrderByDescending(s => s.Points).FirstOrDefault();
+        if (champion != null)
+        {
+            _bestPreviousBrain = champion.Brain;
+            _bestFoodHistory = [.. champion.FoodHistory]; // <-- SAVE THE SCRIPT!
+        }
+
+        List<GameState> parents = [];
+        for (int i = 0; i < numberOfParents; i++)
+        {
+            GameState? bestContender = null;
+            for (int t = 0; t < tournamentSize; t++)
+            {
+                int randomIndex = Random.Shared.Next(validStates.Count);
+                GameState contender = validStates[randomIndex]; // Use validStates here
+
+                if (bestContender == null || contender.Points > bestContender.Points)
+                {
+                    bestContender = contender;
+                }
+            }
+            parents.Add(bestContender!);
+        }
+
+        List<NeuralNetwork> nextGenerationBrains = [];
+        var elites = validStates.OrderByDescending(s => s.Points).Take(elitismCount).ToList();
+
+        foreach (var elite in elites)
+        {
+            // We add the exact brain without mutating it!
+            nextGenerationBrains.Add(elite.Brain);
+        }
+        // --------------------
+
+        // Generate the REST of the population via crossover and mutation
+        // Notice the loop condition is now (populationSize - elitismCount)
+        for (int i = 0; i < populationSize - elitismCount; i++)
+        {
+            GameState parentA = parents[Random.Shared.Next(parents.Count)];
+            GameState parentB = parents[Random.Shared.Next(parents.Count)];
+
+            NeuralNetwork babyBrain = parentA.Brain.CrossoverAndMutate(parentB.Brain, mutationRate: 0.05f);
+            nextGenerationBrains.Add(babyBrain);
+        }
+
+        _finalStates.Clear();
+        for (int i = 0; i < populationSize; i++)
+        {
+            string key = i.ToString();
+            _gameOver[key] = false;
+
+            _gameStates[key] = new GameState(
+                Body: [],
+                Food: new Point(-1, -1),
+                Health: width * heigth,
+                Brain: nextGenerationBrains[i],
+                Visited: [],
+                FoodHistory: [] // <--- ADD THIS HERE!
+            );
+        }
+
+        _gameOver[best] = false;
+        _gameStates[best] = null;
+
+        gen++;
     }
 
     private GameState UpdateFood(GameState? state)
@@ -186,11 +245,74 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
         Point food = state.Food;
         if (food is { X: -1, Y: -1 })
         {
-            food = PickLocation(state.Body);
-            state = state with { Food = food };
+            // --- NEW: REPLAY LOGIC ---
+            if (state.IsReplay && state.ReplayIndex < state.FoodHistory.Count)
+            {
+                // Replay Mode: Feed it the exact apple from the winning run
+                food = state.FoodHistory[state.ReplayIndex];
+                state = state with { ReplayIndex = state.ReplayIndex + 1 };
+            }
+            else
+            {
+                // Live Mode: Spawn random apple and record it
+                food = PickLocation(state.Body);
+                state.FoodHistory.Add(food);
+            }
+            // -------------------------
+
+            Point head = state.Body.Count > 0 ? state.Body[^1] : new Point(0, 0);
+            int exactDistance = GetTrueShortestPath(head, food, state.Body);
+            int dynamicHealth = exactDistance + 50;
+
+            state = state with { Food = food, Health = dynamicHealth };
         }
 
         return state;
+    }
+
+    private int GetTrueShortestPath(Point start, Point target, List<Point> body)
+    {
+        // 1. Setup the BFS Queue and Visited tracker
+        Queue<(Point Position, int Distance)> queue = new();
+        HashSet<Point> visited = [.. body]; // The body is solid obstacles
+
+        // 4 directions (Up, Down, Left, Right)
+        int[] dx = { 0, 1, 0, -1 };
+        int[] dy = { -1, 0, 1, 0 };
+
+        queue.Enqueue((start, 0));
+        visited.Add(start);
+
+        // 2. Flood outward until we find the food
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+
+            // Did we reach the food?
+            if (current.Position.X == target.X && current.Position.Y == target.Y)
+            {
+                return current.Distance;
+            }
+
+            // Check all 4 adjacent squares
+            for (int i = 0; i < 4; i++)
+            {
+                int nx = current.Position.X + dx[i];
+                int ny = current.Position.Y + dy[i];
+                Point nextPoint = new(nx, ny);
+
+                // If the square is on the board and NOT part of the snake's body
+                if (nx >= 0 && nx < width && ny >= 0 && ny < heigth && !visited.Contains(nextPoint))
+                {
+                    visited.Add(nextPoint);
+                    queue.Enqueue((nextPoint, current.Distance + 1));
+                }
+            }
+        }
+
+        // 3. Fallback: If no path is found (the food spawned inside a completely trapped circle of body parts)
+        // We just return the standard Manhattan distance. The snake is doomed anyway.
+        return GetDistance(start, target);
     }
 
     private static GameState GetGameState()
@@ -203,7 +325,8 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
             Food: new Point(-1, -1),
             Health: width * heigth,
             Brain: freshBrain,
-            Visited: []
+            Visited: [],
+            FoodHistory: []
         );
     }
 
@@ -232,8 +355,6 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
 
     private GameState? UpdateBody(GameState? state)
     {
-        int maxHealth = width * heigth;
-
         state ??= GetGameState();
         List<Point> body = state.Body;
 
@@ -284,34 +405,46 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
         if (visitCount == 3)
         {
             pointsModifier += pointForLooping;
-            _finalStates.Add(state with { Points = state.Points + pointsModifier });
-            return null;
+            // REMOVE _finalStates.Add(...)
+            // REMOVE return null;
+
+            // Return the dead state properly!
+            return state with { Points = state.Points + pointsModifier, IsDead = true };
         }
 
         if (newHead.X < 0 || newHead.X >= width || newHead.Y < 0 || newHead.Y >= heigth)
         {
-            _finalStates.Add(state with { Points = state.Points + pointsModifier });
-            return null;
+            pointsModifier += deathPenalty;
+            return state with { Points = state.Points + pointsModifier, IsDead = true };
         }
 
         if (body.Contains(newHead) && newHead != body[0])
         {
-            _finalStates.Add(state with { Points = state.Points + pointsModifier });
-            return null;
+            pointsModifier += deathPenalty;
+            return state with { Points = state.Points + pointsModifier, IsDead = true };
         }
 
         int currentHealth = state.Health - 1;
         if (currentHealth <= 0)
         {
-            _finalStates.Add(state with { Points = state.Points + pointsModifier });
-
-            return null;
+            pointsModifier += deathPenalty;
+            return state with { Points = state.Points + pointsModifier, IsDead = true };
         }
 
         body.Add(newHead);
         if (newHead.X == state.Food.X && newHead.Y == state.Food.Y)
         {
-            state = state with { Food = new Point(-1, -1), Health = maxHealth, Points = state.Points + eatenApplePoints + pointsModifier, Visited = [] };
+            // --- NEW: Exponential Apple Scoring ---
+            int applesEaten = body.Count - initialSize;
+            int dynamicAppleReward = eatenApplePoints + (applesEaten * 5000);
+
+            state = state with
+            {
+                Food = new Point(-1, -1),
+                // Notice Health is NOT set here! UpdateFood will set it using BFS.
+                Points = state.Points + dynamicAppleReward + pointsModifier,
+                Visited = []
+            };
         }
         else
         {
