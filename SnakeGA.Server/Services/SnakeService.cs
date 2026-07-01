@@ -22,9 +22,20 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
     private const int wrongDirectionPoints = -3;
     private const int rightDirectionPoints = 1;
     private const int pointForLooping = -100;
+    private const int preTrainGenerations = 5_000;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await Task.Yield();
+        while (gen <= preTrainGenerations && !stoppingToken.IsCancellationRequested)
+        {
+            if (gen % 100 == 0)
+            {
+                Console.WriteLine($"Gen: {gen}");
+            }
+            GenerateNextGenerationData();
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var gameStates = GenerateNextGenerationData();
@@ -325,11 +336,11 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
     }
     private static float[] GetVision(Point head, List<Point> body, Point food)
     {
-        float[] vision = new float[24];
+        float[] vision = new float[26];
         HashSet<Point> bodySet = [.. body];
 
-        int[] dx = { 0, 1, 1, 1, 0, -1, -1, -1 };
-        int[] dy = { -1, -1, 0, 1, 1, 1, 0, -1 };
+        int[] dx = [0, 1, 1, 1, 0, -1, -1, -1];
+        int[] dy = [-1, -1, 0, 1, 1, 1, 0, -1];
 
         for (int i = 0; i < 8; i++)
         {
@@ -371,6 +382,9 @@ public class SnakeService(IHubContext<SnakeHub> hubContext) : BackgroundService
                 }
             }
         }
+
+        vision[24] = (float)(food.X - head.X) / width;
+        vision[25] = (float)(food.Y - head.Y) / heigth;
 
         return vision;
     }
