@@ -1,6 +1,4 @@
-﻿using System.Text.Json.Serialization;
-
-namespace SnakeGA.Server.Dtos;
+﻿namespace SnakeGA.Server.Dtos;
 
 public record class GameState
 (

@@ -1,7 +1,3 @@
-using SnakeGA.Server.Dtos;
-using SnakeGA.Server.Hubs;
-using SnakeGA.Server.Services;
-
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
@@ -42,7 +38,37 @@ app.MapHub<SnakeHub>("/snake");
 app.MapPost("/api/simulate/{count}", (int count, SimulationControl control) =>
 {
     control.TargetGeneration += count;
-    return Results.Ok(new { TargetGeneration = control.TargetGeneration });
+    return Results.Ok(new { control.TargetGeneration });
+});
+
+app.MapPost("/api/settings", (SimulationControl newSettings, SimulationControl control) =>
+{
+    control.MutationRate = newSettings.MutationRate;
+    control.TournamentSize = newSettings.TournamentSize;
+    control.ElitismCount = newSettings.ElitismCount;
+    control.NumberOfParents = newSettings.NumberOfParents;
+
+    control.EatenApplePoints = newSettings.EatenApplePoints;
+    control.ExtraApplesMultiplier = newSettings.ExtraApplesMultiplier;
+    control.RightDirectionPoints = newSettings.RightDirectionPoints;
+    control.WrongDirectionPoints = newSettings.WrongDirectionPoints;
+    control.PointForLooping = newSettings.PointForLooping;
+    control.DeathPenalty = newSettings.DeathPenalty;
+    control.NumberOfRepeats = newSettings.NumberOfRepeats;
+    control.HealthOffset = newSettings.HealthOffset;
+
+    return Results.Ok(control);
+});
+
+app.MapGet("/api/brain/export", (SimulationControl control) =>
+{
+    return control.BestBrain is null ? Results.NotFound("No champion brain available yet.") : Results.Ok(control.BestBrain);
+});
+
+app.MapPost("/api/brain/import", (NeuralNetwork importedBrain, SimulationControl control) =>
+{
+    control.InjectedBrain = importedBrain;
+    return Results.Ok();
 });
 
 app.Run();

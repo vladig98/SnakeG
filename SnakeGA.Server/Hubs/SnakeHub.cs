@@ -1,6 +1,4 @@
-﻿using Microsoft.AspNetCore.SignalR;
-
-namespace SnakeGA.Server.Hubs;
+﻿namespace SnakeGA.Server.Hubs;
 
 public class SnakeHub : Hub
 {
